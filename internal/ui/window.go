@@ -1,360 +1,274 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
-	"strings"
-
-	"pdf-reader/internal/gpt"
-	"pdf-reader/internal/pdf"
-	"pdf-reader/internal/render"
-
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/memleak-io/gpt-pdf/internal/gpt"
+	"github.com/memleak-io/gpt-pdf/internal/pdf"
 )
 
 type MainWindow struct {
-	window      fyne.Window
-	pdfDisplay  *canvas.Image
-	gptView     *container.Scroll
-	gptInput    *widget.Entry
-	chatHistory []string
-	pageNum     int
-	zoomLevel   float64
-	pdfHandler  *pdf.Handler
-	gptHandler  *gpt.Handler
-	mdRenderer  *render.MarkdownRenderer
-	statusBar   *widget.Label
-	pageLabel   *widget.Label
-	zoomLabel   *widget.Label
-	scrollPDF   *container.Scroll
+	window         fyne.Window
+	pdfHandler     *pdf.Handler
+	gptHandler     *gpt.Handler
+	currentPage    int
+	pdfViewer      *canvas.Image
+	pdfContainer   *fyne.Container
+	imageContainer *fyne.Container
+	chatView       *widget.TextGrid
+	pageLabel      *widget.Label
+	zoomLevel      float64
+	chatInput      *widget.Entry
 }
 
 func NewMainWindow(window fyne.Window) *MainWindow {
-	m := &MainWindow{
+	w := &MainWindow{
 		window:      window,
-		pdfDisplay:  canvas.NewImageFromImage(nil),
-		gptInput:    widget.NewEntry(),
-		chatHistory: make([]string, 0),
-		pageNum:     1,
+		currentPage: 1,
+		chatView:    widget.NewTextGrid(),
 		zoomLevel:   1.0,
-		pdfHandler:  pdf.NewHandler(),
-		gptHandler:  gpt.NewHandler(),
-		mdRenderer:  render.NewMarkdownRenderer(),
-		statusBar:   widget.NewLabel("No PDF loaded"),
-		pageLabel:   widget.NewLabel("Page: -"),
-		zoomLabel:   widget.NewLabel("Zoom: 100%"),
 	}
 
-	// Initialize the chat view with an empty container
-	vbox := container.NewVBox()
-	m.gptView = container.NewScroll(vbox)
+	// Create GPT handler
+	gptHandler := gpt.NewHandler()
+	w.gptHandler = gptHandler
 
-	return m
-}
+	// Create the PDF viewer
+	w.pdfViewer = canvas.NewImageFromResource(nil)
+	w.pdfViewer.FillMode = canvas.ImageFillContain
+	w.pdfViewer.SetMinSize(fyne.NewSize(600, 800))
+	w.imageContainer = container.NewCenter(w.pdfViewer)
 
-func (m *MainWindow) prevPage() {
-	if m.pageNum > 1 {
-		m.pageNum--
-		m.updatePageDisplay()
-	}
-}
+	// Create navigation controls
+	prevButton := widget.NewButton("Previous", w.previousPage)
+	w.pageLabel = widget.NewLabel("Page: 1")
+	nextButton := widget.NewButton("Next", w.nextPage)
+	zoomInButton := widget.NewButton("Zoom In", w.zoomIn)
+	zoomOutButton := widget.NewButton("Zoom Out", w.zoomOut)
+	askGPTButton := widget.NewButton("Ask GPT", w.askGPT)
 
-func (m *MainWindow) nextPage() {
-	if m.pageNum < m.pdfHandler.GetPageCount() {
-		m.pageNum++
-		m.updatePageDisplay()
-	}
-}
-
-func (m *MainWindow) analyzePage() {
-	if m.pdfHandler == nil {
-		dialog.ShowError(fmt.Errorf("no PDF loaded"), m.window)
-		return
-	}
-
-	// Get the current page with original size for better analysis
-	pageInfo, err := m.pdfHandler.GetPage(m.pageNum, 1.0)
-	if err != nil {
-		dialog.ShowError(fmt.Errorf("failed to get page: %w", err), m.window)
-		return
-	}
-
-	// Create a description of the page
-	pageDesc := fmt.Sprintf("This is page %d of the PDF document. The page dimensions are %dx%d pixels.",
-		m.pageNum, pageInfo.Width, pageInfo.Height)
-
-	// Send the page description and original image to GPT for analysis
-	response, err := m.gptHandler.AnalyzePage(pageDesc, pageInfo.OriginalImg)
-	if err != nil {
-		dialog.ShowError(fmt.Errorf("failed to analyze page: %w", err), m.window)
-		return
-	}
-
-	m.appendToChat(fmt.Sprintf("Analysis of page %d:", m.pageNum))
-	m.appendToChat("Assistant: " + response)
-}
-
-func (m *MainWindow) adjustZoom(delta float64) {
-	newZoom := m.zoomLevel + delta
-	if newZoom >= 0.1 && newZoom <= 5.0 {
-		m.zoomLevel = newZoom
-		m.updateZoomLabel()
-		m.updatePageDisplay()
-	}
-}
-
-func (m *MainWindow) updateZoomLabel() {
-	m.zoomLabel.SetText(fmt.Sprintf("Zoom: %.0f%%", m.zoomLevel*100))
-}
-
-func (m *MainWindow) Setup() {
-	// Set window title and size
-	m.window.SetTitle("PDF Reader with GPT")
-	m.window.Resize(fyne.NewSize(1200, 800))
-
-	// Set up file open button
-	openBtn := widget.NewButton("Open PDF", func() {
-		dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
-			if err != nil {
-				dialog.ShowError(err, m.window)
-				return
-			}
-			if reader == nil {
-				return
-			}
-			defer reader.Close()
-
-			if err := m.pdfHandler.LoadPDF(reader.URI().Path()); err != nil {
-				dialog.ShowError(err, m.window)
-				return
-			}
-
-			m.pageNum = 1
-			m.updatePage()
-		}, m.window)
-	})
-
-	// Navigation controls
-	prevBtn := widget.NewButton("Previous", m.prevPage)
-	nextBtn := widget.NewButton("Next", m.nextPage)
-
-	// Add zoom controls with finer adjustments
-	zoomOutBtn := widget.NewButton("-", func() { m.adjustZoom(-0.1) })
-	zoomInBtn := widget.NewButton("+", func() { m.adjustZoom(0.1) })
-
-	// Add preset zoom levels
-	zoomPresets := widget.NewSelect([]string{"10%", "25%", "50%", "75%", "100%", "125%", "150%", "200%"}, func(value string) {
-		var zoom float64
-		switch value {
-		case "10%":
-			zoom = 0.1
-		case "25%":
-			zoom = 0.25
-		case "50%":
-			zoom = 0.5
-		case "75%":
-			zoom = 0.75
-		case "100%":
-			zoom = 1.0
-		case "125%":
-			zoom = 1.25
-		case "150%":
-			zoom = 1.5
-		case "200%":
-			zoom = 2.0
-		}
-		m.zoomLevel = zoom
-		m.updatePage()
-		m.zoomLabel.SetText(fmt.Sprintf("Zoom: %d%%", int(zoom*100)))
-	})
-	zoomPresets.SetSelected("100%")
-
-	// Combine all controls into one row
-	navControls := container.NewHBox(
-		prevBtn,
-		m.pageLabel,
-		nextBtn,
+	// Create navigation container
+	navContainer := container.NewHBox(
+		prevButton,
+		w.pageLabel,
+		nextButton,
 		widget.NewSeparator(),
-		m.zoomLabel,
-		zoomOutBtn,
-		zoomPresets,
-		zoomInBtn,
+		zoomInButton,
+		zoomOutButton,
+		widget.NewSeparator(),
+		askGPTButton,
 	)
+
+	// Create PDF container with navigation
+	w.pdfContainer = container.NewBorder(
+		navContainer, // top
+		nil,         // bottom
+		nil,         // left
+		nil,         // right
+		w.imageContainer,
+	)
+
+	// Create chat input
+	w.chatInput = widget.NewEntry()
+	w.chatInput.SetPlaceHolder("Ask a question about the page...")
+	w.chatInput.OnSubmitted = w.handleChatInput
+
+	// Create chat container with scroll
+	chatScroll := container.NewScroll(w.chatView)
+	chatScroll.SetMinSize(fyne.NewSize(300, 600))
+	chatContainer := container.NewBorder(nil, w.chatInput, nil, nil, chatScroll)
+
+	// Create main container with split
+	split := container.NewHSplit(w.pdfContainer, chatContainer)
+	split.SetOffset(0.7)
 
 	// Create toolbar
-	toolbar := container.NewHBox(
-		openBtn,
-		widget.NewSeparator(),
-		navControls,
+	toolbar := widget.NewToolbar(
+		widget.NewToolbarAction(theme.DocumentIcon(), w.openPDF),
 	)
 
-	// PDF display area
-	m.pdfDisplay.FillMode = canvas.ImageFillContain
-	m.pdfDisplay.SetMinSize(fyne.NewSize(600, 800))
+	// Set window content
+	window.SetContent(container.NewBorder(toolbar, nil, nil, nil, split))
+	window.Resize(fyne.NewSize(1200, 800))
 
-	// Create a container to center the PDF display
-	pdfContainer := container.NewCenter(m.pdfDisplay)
+	return w
+}
 
-	// Create a scroll container for the PDF content
-	m.scrollPDF = container.NewScroll(pdfContainer)
+func (w *MainWindow) zoomIn() {
+	w.zoomLevel *= 1.2
+	w.updatePageDisplay()
+}
 
-	// Set up GPT input and chat
-	m.gptInput.SetPlaceHolder("Ask a question about the PDF...")
-	m.gptInput.OnSubmitted = func(q string) {
-		if q == "" {
-			return
-		}
+func (w *MainWindow) zoomOut() {
+	w.zoomLevel *= 0.8
+	w.updatePageDisplay()
+}
 
-		// Add user question to chat
-		m.appendToChat("You: " + q)
+func (w *MainWindow) askGPT() {
+	if w.pdfHandler == nil {
+		w.showError(fmt.Errorf("please open a PDF file first"))
+		return
+	}
 
-		// Get GPT response
-		response, err := m.gptHandler.AskQuestion(q, m.chatHistory)
+	if w.gptHandler == nil {
+		w.showError(fmt.Errorf("GPT handler not initialized"))
+		return
+	}
+
+	// Get the current page as an image
+	imgData, err := w.pdfHandler.RenderPage(w.currentPage)
+	if err != nil {
+		w.showError(fmt.Errorf("error capturing page: %v", err))
+		return
+	}
+
+	question := w.chatInput.Text
+	if question == "" {
+		question = "What do you see in this image? Please describe it in detail."
+	}
+
+	w.appendToChatView(fmt.Sprintf("You: %s\n", question))
+
+	// Send both the image and the question to GPT
+	response, err := w.gptHandler.AnalyzePageWithImage(imgData, &question)
+	if err != nil {
+		w.showError(fmt.Errorf("error from GPT: %v", err))
+		return
+	}
+	w.appendToChatView(fmt.Sprintf("GPT: %s\n", response))
+}
+
+func (w *MainWindow) handleChatInput(input string) {
+	if input == "" {
+		return
+	}
+	w.chatInput.SetText("")
+	w.askGPT()
+}
+
+func (w *MainWindow) appendToChatView(text string) {
+	currentText := w.chatView.Text()
+	w.chatView.SetText(currentText + text)
+	w.chatView.Refresh()
+}
+
+func (w *MainWindow) openPDF() {
+	// If there's already a PDF open, close it
+	if w.pdfHandler != nil {
+		w.pdfHandler.Close()
+		w.pdfHandler = nil
+	}
+
+	// Show file dialog
+	fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
 		if err != nil {
-			dialog.ShowError(err, m.window)
+			w.showError(err)
+			return
+		}
+		if reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		// Get the file path
+		filePath := reader.URI().Path()
+		if filePath[0] == '/' && len(filePath) > 2 && filePath[2] == ':' {
+			// Remove leading slash from Windows paths
+			filePath = filePath[1:]
+		}
+
+		// Create new PDF handler
+		handler, err := pdf.NewHandler(filePath)
+		if err != nil {
+			w.showError(fmt.Errorf("error opening PDF: %v", err))
 			return
 		}
 
-		// Format and add response to chat
-		m.appendToChat("Assistant: " + response)
+		w.pdfHandler = handler
+		w.currentPage = 1
+		w.zoomLevel = 1.0
+		w.updatePageDisplay()
+	}, w.window)
 
-		// Clear input
-		m.gptInput.SetText("")
-	}
-
-	analyzeBtn := widget.NewButton("Analyze Current Page", m.analyzePage)
-
-	// Create chat interface with full height
-	chatContainer := container.NewBorder(
-		analyzeBtn, // Top
-		m.gptInput, // Bottom
-		nil,        // Left
-		nil,        // Right
-		m.gptView,  // Center (takes remaining space)
-	)
-
-	// Create the main layout with a split
-	split := container.NewHSplit(
-		m.scrollPDF,   // Left side - PDF viewer
-		chatContainer, // Right side - Chat interface
-	)
-	split.SetOffset(0.6) // Set the split to 60% PDF, 40% chat
-
-	// Create the main layout
-	mainContent := container.NewBorder(
-		toolbar,     // Top
-		m.statusBar, // Bottom
-		nil,         // Left
-		nil,         // Right
-		split,       // Center
-	)
-
-	m.window.SetContent(mainContent)
+	// Only allow PDF files
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{".pdf"}))
+	fd.Show()
 }
 
-func (m *MainWindow) updatePage() {
-	if m.pdfHandler == nil {
+func (w *MainWindow) previousPage() {
+	if w.pdfHandler == nil {
 		return
 	}
 
-	// Update page info
-	pageInfo, err := m.pdfHandler.GetPage(m.pageNum, m.zoomLevel)
+	if w.currentPage > 1 {
+		w.currentPage--
+		w.updatePageDisplay()
+	}
+}
+
+func (w *MainWindow) nextPage() {
+	if w.pdfHandler == nil {
+		return
+	}
+
+	if w.currentPage < w.pdfHandler.GetNumPages() {
+		w.currentPage++
+		w.updatePageDisplay()
+	}
+}
+
+func (w *MainWindow) updatePageDisplay() {
+	if w.pdfHandler == nil {
+		return
+	}
+
+	// Update page label
+	w.pageLabel.SetText(fmt.Sprintf("Page: %d / %d", w.currentPage, w.pdfHandler.GetNumPages()))
+
+	// Render the current page
+	imgData, err := w.pdfHandler.RenderPage(w.currentPage)
 	if err != nil {
-		dialog.ShowError(err, m.window)
+		w.showError(err)
 		return
 	}
 
-	// Update page display
-	m.updatePageDisplay()
+	// Create new image from the rendered page
+	newImg := canvas.NewImageFromReader(bytes.NewReader(imgData), "page.png")
+	newImg.FillMode = canvas.ImageFillContain
+	
+	// Apply zoom
+	baseSize := fyne.NewSize(600, 800)
+	zoomedSize := fyne.NewSize(
+		float32(float64(baseSize.Width) * w.zoomLevel),
+		float32(float64(baseSize.Height) * w.zoomLevel),
+	)
+	newImg.SetMinSize(zoomedSize)
 
-	// Update status
-	m.pageLabel.SetText(fmt.Sprintf("Page: %d/%d", m.pageNum, m.pdfHandler.GetPageCount()))
-	m.statusBar.SetText(fmt.Sprintf("Page %d - %dx%d pixels", m.pageNum, pageInfo.Width, pageInfo.Height))
+	// Replace the old image
+	w.pdfViewer = newImg
+	w.imageContainer.Objects = []fyne.CanvasObject{newImg}
+	w.imageContainer.Refresh()
 }
 
-func (m *MainWindow) updatePageDisplay() {
-	if m.pdfHandler == nil {
-		return
-	}
+func (w *MainWindow) showError(err error) {
+	// Create a text entry with the error message
+	errorText := widget.NewMultiLineEntry()
+	errorText.SetText(err.Error())
+	errorText.TextStyle = fyne.TextStyle{Monospace: true}
+	errorText.Wrapping = fyne.TextWrapWord
+	
+	// Make it read-only but selectable
+	errorText.Disable()
 
-	totalPages := m.pdfHandler.GetPageCount()
-	if totalPages == 0 {
-		return
-	}
-
-	// Ensure page number is within bounds
-	if m.pageNum < 1 {
-		m.pageNum = 1
-	} else if m.pageNum > totalPages {
-		m.pageNum = totalPages
-	}
-
-	// Get page image
-	pageInfo, err := m.pdfHandler.GetPage(m.pageNum, m.zoomLevel)
-	if err != nil {
-		dialog.ShowError(err, m.window)
-		return
-	}
-
-	// Update image display
-	m.pdfDisplay.Image = pageInfo.Image
-	m.pdfDisplay.Refresh()
-
-	// Update status
-	m.pageLabel.SetText(fmt.Sprintf("Page: %d/%d", m.pageNum, totalPages))
-	m.statusBar.SetText(fmt.Sprintf("Page %d - %dx%d pixels", m.pageNum, pageInfo.Width, pageInfo.Height))
-}
-
-func (m *MainWindow) appendToChat(message string) {
-	m.chatHistory = append(m.chatHistory, message)
-
-	// Update chat view with rendered markdown
-	vbox := container.NewVBox()
-
-	for _, msg := range m.chatHistory {
-		if strings.HasPrefix(msg, "Assistant: ") {
-			// Render assistant messages as markdown
-			content := strings.TrimPrefix(msg, "Assistant: ")
-			rendered := m.mdRenderer.RenderMarkdown(content)
-			vbox.Add(rendered)
-		} else {
-			// Regular text for user messages
-			label := widget.NewLabel(msg)
-			label.Wrapping = fyne.TextWrapWord
-			vbox.Add(label)
-		}
-
-		// Add spacing between messages
-		vbox.Add(widget.NewSeparator())
-	}
-
-	// Update the scroll container content
-	m.gptView.Content = vbox
-	m.gptView.Refresh()
-	// Scroll to bottom
-	m.gptView.ScrollToBottom()
-}
-
-func (m *MainWindow) formatGPTResponse(response string) string {
-	// Split response into paragraphs
-	paragraphs := strings.Split(response, "\n")
-
-	// Format each paragraph
-	var formatted strings.Builder
-	for _, p := range paragraphs {
-		// Trim whitespace
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-
-		// Add paragraph to formatted text
-		formatted.WriteString(p)
-		formatted.WriteString("\n\n")
-	}
-
-	return strings.TrimSpace(formatted.String())
+	// Create a custom dialog
+	d := dialog.NewCustom("Error", "OK", errorText, w.window)
+	d.Resize(fyne.NewSize(400, 200))
+	d.Show()
 }

@@ -1,238 +1,118 @@
 package gpt
 
 import (
-	"bytes"
+	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"image"
-	"image/jpeg"
-	"io"
-	"net/http"
 	"os"
-	"strings"
+
+	openai "github.com/sashabaranov/go-openai"
 )
 
+// Handler manages GPT operations
 type Handler struct {
-	apiKey string
+	client *openai.Client
 }
 
+// NewHandler creates a new GPT handler
 func NewHandler() *Handler {
-	return &Handler{
-		apiKey: os.Getenv("OPENAI_API_KEY"),
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	if apiKey == "" {
+		return nil
 	}
+
+	client := openai.NewClient(apiKey)
+	return &Handler{client: client}
 }
 
-func (h *Handler) imageToBase64(img image.Image) (string, error) {
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
-		return "", fmt.Errorf("failed to encode image: %w", err)
-	}
-	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
-}
+// Ask sends a question to GPT and returns the response
+func (h *Handler) Ask(question string) (string, error) {
+	resp, err := h.client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: openai.GPT4,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: question,
+				},
+			},
+		},
+	)
 
-type GPTRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-}
-
-type Message struct {
-	Role    string    `json:"role"`
-	Content []Content `json:"content"`
-}
-
-type Content struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *ImageURL `json:"image_url,omitempty"`
-}
-
-type ImageURL struct {
-	URL string `json:"url"`
-}
-
-type GPTResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-}
-
-func (h *Handler) AnalyzePage(pageDesc string, img image.Image) (string, error) {
-	base64Img, err := h.imageToBase64(img)
 	if err != nil {
-		return "", fmt.Errorf("failed to convert image: %w", err)
+		return "", fmt.Errorf("error getting GPT response: %v", err)
 	}
 
-	reqBody := struct {
-		Model     string `json:"model"`
-		Messages  []any  `json:"messages"`
-		MaxTokens int    `json:"max_tokens"`
-	}{
-		Model: "gpt-4o-mini",
-		Messages: []any{
-			map[string]any{
-				"role": "user",
-				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": fmt.Sprintf(`Analyze this PDF page. Here's the context: %s
+	return resp.Choices[0].Message.Content, nil
+}
 
-Please provide a detailed analysis including:
-1. A description of what you see on the page
-2. Any key information or important points
-3. The overall layout and structure
-4. Any notable text, diagrams, or figures`, pageDesc),
+// AnalyzePage analyzes the text content of a PDF page
+func (h *Handler) AnalyzePage(text string, _ interface{}) (string, error) {
+	prompt := fmt.Sprintf("Please analyze the following text from a PDF page:\n\n%s\n\nProvide a concise summary and highlight any key points.", text)
+
+	resp, err := h.client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: openai.GPT4,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: "You are a helpful assistant that analyzes PDF content. Focus on extracting key information and providing clear, concise summaries.",
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: prompt,
+				},
+			},
+		},
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("error analyzing page: %v", err)
+	}
+
+	return resp.Choices[0].Message.Content, nil
+}
+
+// AnalyzePageWithImage sends both the image and question to GPT-4 Vision
+func (h *Handler) AnalyzePageWithImage(imgData []byte, question *string) (string, error) {
+	// Convert image to base64
+	b64Img := base64.StdEncoding.EncodeToString(imgData)
+
+	// Create the request
+	req := openai.ChatCompletionRequest{
+		Model: "gpt-4o",
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role: openai.ChatMessageRoleUser,
+				MultiContent: []openai.ChatMessagePart{
+					{
+						Type: openai.ChatMessagePartTypeText,
+						Text: *question,
 					},
 					{
-						"type": "image_url",
-						"image_url": map[string]any{
-							"url":    fmt.Sprintf("data:image/jpeg;base64,%s", base64Img),
-							"detail": "high",
+						Type: openai.ChatMessagePartTypeImageURL,
+						ImageURL: &openai.ChatMessageImageURL{
+							URL:    fmt.Sprintf("data:image/png;base64,%s", b64Img),
+							Detail: openai.ImageURLDetailHigh,
 						},
 					},
 				},
 			},
 		},
-		MaxTokens: 300,
+		MaxTokens: 1000,
 	}
 
-	jsonBody, err := json.Marshal(reqBody)
+	// Send the request
+	resp, err := h.client.CreateChatCompletion(context.Background(), req)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return "", fmt.Errorf("GPT API error: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+h.apiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API error: %s", string(body))
-	}
-
-	var gptResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-
-	if err := json.Unmarshal(body, &gptResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if len(gptResp.Choices) == 0 {
+	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("no response from GPT")
 	}
 
-	return gptResp.Choices[0].Message.Content, nil
-}
-
-func (h *Handler) AskQuestion(question string, history []string) (string, error) {
-	// For follow-up questions, we'll use a simpler text-only request
-	messages := []map[string]any{
-		{
-			"role":    "system",
-			"content": "You are a helpful assistant analyzing PDF content. Provide clear, well-structured responses.",
-		},
-	}
-
-	// Add chat history
-	for _, msg := range history {
-		role := "user"
-		content := msg
-
-		if strings.HasPrefix(msg, "Assistant: ") {
-			role = "assistant"
-			content = strings.TrimPrefix(msg, "Assistant: ")
-		} else if strings.HasPrefix(msg, "You: ") {
-			content = strings.TrimPrefix(msg, "You: ")
-		}
-
-		messages = append(messages, map[string]any{
-			"role":    role,
-			"content": content,
-		})
-	}
-
-	// Add current question
-	messages = append(messages, map[string]any{
-		"role":    "user",
-		"content": question,
-	})
-
-	reqBody := struct {
-		Model     string         `json:"model"`
-		Messages  []map[string]any `json:"messages"`
-		MaxTokens int           `json:"max_tokens"`
-	}{
-		Model:     "gpt-4o-mini",
-		Messages:  messages,
-		MaxTokens: 300,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+h.apiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API error: %s", string(body))
-	}
-
-	var gptResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-
-	if err := json.Unmarshal(body, &gptResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if len(gptResp.Choices) == 0 {
-		return "", fmt.Errorf("no response from GPT")
-	}
-
-	return gptResp.Choices[0].Message.Content, nil
+	return resp.Choices[0].Message.Content, nil
 }

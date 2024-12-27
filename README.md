@@ -41,3 +41,10 @@ go run main.go
 ## Note
 
 Make sure you have a valid OpenAI API key set in your environment variables before using the GPT analysis feature.
+
+
+
+
+We don't need to extract the text from the PDF and send it to GPT. We can just send the image to GPT and get the response.
+
+we should render the pdf using a pdf reader library or what ever it is called. this meand that we simply render the pdf using a pdf reader library and then send the image to GPT and get the response.

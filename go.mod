@@ -1,14 +1,11 @@
-module pdf-reader
+module github.com/memleak-io/gpt-pdf
 
 go 1.21
 
 require (
 	fyne.io/fyne/v2 v2.4.3
-	github.com/gen2brain/go-fitz v1.23.7
-	github.com/go-latex/latex v0.0.0-20231108140139-5c1ce85aa4ea
 	github.com/joho/godotenv v1.5.1
-	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646
-	github.com/yuin/goldmark v1.6.0
+	github.com/sashabaranov/go-openai v1.36.1
 )
 
 require (
@@ -31,11 +28,12 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.8.4 // indirect
 	github.com/tevino/abool v1.2.0 // indirect
-	golang.org/x/image v0.14.0 // indirect
+	github.com/yuin/goldmark v1.5.5 // indirect
+	golang.org/x/image v0.11.0 // indirect
 	golang.org/x/mobile v0.0.0-20230531173138-3c911d8e3eda // indirect
 	golang.org/x/net v0.17.0 // indirect
 	golang.org/x/sys v0.13.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.13.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	honnef.co/go/js/dom v0.0.0-20210725211120-f030747120f2 // indirect
 )
