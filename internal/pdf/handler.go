@@ -9,115 +9,102 @@ import (
 	"github.com/nfnt/resize"
 )
 
-type Handler struct {
-	doc      *fitz.Document
-	mutex    sync.RWMutex
-	pageInfo map[string]*PageInfo
+type PageInfo struct {
+	Image       image.Image
+	OriginalImg image.Image
+	Width       int
+	Height      int
 }
 
-type PageInfo struct {
-	Text    string
-	Image   image.Image
-	Width   float64
-	Height  float64
+type Handler struct {
+	doc   *fitz.Document
+	cache sync.Map
 }
 
 func NewHandler() *Handler {
-	return &Handler{
-		pageInfo: make(map[string]*PageInfo),
-	}
+	return &Handler{}
 }
 
-func (h *Handler) LoadPDF(filepath string) error {
-	h.mutex.Lock()
+func (h *Handler) LoadPDF(path string) error {
 	if h.doc != nil {
 		h.doc.Close()
 	}
-	h.pageInfo = make(map[string]*PageInfo)
-	h.mutex.Unlock()
+	h.cache.Range(func(key, value interface{}) bool {
+		h.cache.Delete(key)
+		return true
+	})
 
-	doc, err := fitz.New(filepath)
+	doc, err := fitz.New(path)
 	if err != nil {
 		return fmt.Errorf("failed to load PDF: %w", err)
 	}
 
-	h.mutex.Lock()
 	h.doc = doc
-	h.mutex.Unlock()
 	return nil
 }
 
-func (h *Handler) GetPage(pageNum int, zoom float64) (*PageInfo, error) {
-	h.mutex.RLock()
+func (h *Handler) GetPage(pageNum int, zoom float64) (PageInfo, error) {
 	if h.doc == nil {
-		h.mutex.RUnlock()
-		return nil, fmt.Errorf("no PDF loaded")
+		return PageInfo{}, fmt.Errorf("no PDF loaded")
 	}
 
-	pageIndex := pageNum - 1
-	if pageIndex < 0 || pageIndex >= h.doc.NumPage() {
-		h.mutex.RUnlock()
-		return nil, fmt.Errorf("page number out of range")
+	if pageNum < 1 || pageNum > h.doc.NumPage() {
+		return PageInfo{}, fmt.Errorf("invalid page number")
 	}
 
-	cacheKey := fmt.Sprintf("%d_%.2f", pageNum, zoom)
+	// Create cache key that includes zoom level
+	cacheKey := fmt.Sprintf("%d-%.2f", pageNum, zoom)
 
-	if info, exists := h.pageInfo[cacheKey]; exists {
-		h.mutex.RUnlock()
-		return info, nil
+	// Check cache first
+	if cached, ok := h.cache.Load(cacheKey); ok {
+		if pageInfo, ok := cached.(PageInfo); ok {
+			return pageInfo, nil
+		}
 	}
-	h.mutex.RUnlock()
 
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-
-	text, err := h.doc.Text(pageIndex)
+	// Get original page image
+	origImg, err := h.doc.Image(pageNum-1)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract text: %w", err)
+		return PageInfo{}, fmt.Errorf("failed to get page image: %w", err)
 	}
 
-	img, err := h.doc.Image(pageIndex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render page: %w", err)
-	}
-
-	bounds := img.Bounds()
+	bounds := origImg.Bounds()
 	origWidth := bounds.Dx()
 	origHeight := bounds.Dy()
 
-	newWidth := uint(float64(origWidth) * zoom)
-	newHeight := uint(float64(origHeight) * zoom)
-
-	scaledImg := resize.Resize(newWidth, newHeight, img, resize.Lanczos3)
-
-	info := &PageInfo{
-		Text:   text,
-		Image:  scaledImg,
-		Width:  float64(newWidth),
-		Height: float64(newHeight),
+	// Create zoomed image if needed
+	var displayImg image.Image
+	if zoom != 1.0 {
+		newWidth := uint(float64(origWidth) * zoom)
+		newHeight := uint(float64(origHeight) * zoom)
+		displayImg = resize.Resize(newWidth, newHeight, origImg, resize.Lanczos3)
+	} else {
+		displayImg = origImg
 	}
 
-	h.pageInfo[cacheKey] = info
-	return info, nil
+	pageInfo := PageInfo{
+		Image:       displayImg,
+		OriginalImg: origImg,
+		Width:       origWidth,
+		Height:      origHeight,
+	}
+
+	// Cache the result
+	h.cache.Store(cacheKey, pageInfo)
+
+	return pageInfo, nil
 }
 
-func (h *Handler) NumPages() int {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
+func (h *Handler) Close() error {
+	if h.doc != nil {
+		return h.doc.Close()
+	}
+	return nil
+}
 
+func (h *Handler) GetPageCount() int {
 	if h.doc == nil {
 		return 0
 	}
 	return h.doc.NumPage()
-}
-
-func (h *Handler) Close() {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-
-	if h.doc != nil {
-		h.doc.Close()
-		h.doc = nil
-	}
-	h.pageInfo = make(map[string]*PageInfo)
 }

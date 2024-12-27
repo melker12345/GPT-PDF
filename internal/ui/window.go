@@ -17,7 +17,6 @@ import (
 type MainWindow struct {
 	window      fyne.Window
 	pdfDisplay  *canvas.Image
-	pageText    *widget.TextGrid
 	gptView     *widget.Entry
 	gptInput    *widget.Entry
 	chatHistory []string
@@ -35,7 +34,6 @@ func NewMainWindow(window fyne.Window) *MainWindow {
 	return &MainWindow{
 		window:      window,
 		pdfDisplay:  canvas.NewImageFromImage(nil),
-		pageText:    widget.NewTextGrid(),
 		gptView:     widget.NewMultiLineEntry(),
 		gptInput:    widget.NewEntry(),
 		chatHistory: make([]string, 0),
@@ -57,7 +55,7 @@ func (m *MainWindow) prevPage() {
 }
 
 func (m *MainWindow) nextPage() {
-	if m.pageNum < m.pdfHandler.NumPages() {
+	if m.pageNum < m.pdfHandler.GetPageCount() {
 		m.pageNum++
 		m.updatePageDisplay()
 	}
@@ -65,32 +63,43 @@ func (m *MainWindow) nextPage() {
 
 func (m *MainWindow) analyzePage() {
 	if m.pdfHandler == nil {
+		dialog.ShowError(fmt.Errorf("no PDF loaded"), m.window)
 		return
 	}
 
-	pageInfo, err := m.pdfHandler.GetPage(m.pageNum, m.zoomLevel)
+	// Get the current page with original size for better analysis
+	pageInfo, err := m.pdfHandler.GetPage(m.pageNum, 1.0)
 	if err != nil {
-		dialog.ShowError(err, m.window)
+		dialog.ShowError(fmt.Errorf("failed to get page: %w", err), m.window)
 		return
 	}
 
-	// Use GPT to analyze the text
-	analysis, err := m.gptHandler.AnalyzePage(pageInfo.Text)
+	// Create a description of the page
+	pageDesc := fmt.Sprintf("This is page %d of the PDF document. The page dimensions are %dx%d pixels.", 
+		m.pageNum, pageInfo.Width, pageInfo.Height)
+
+	// Send the page description and original image to GPT for analysis
+	response, err := m.gptHandler.AnalyzePage(pageDesc, pageInfo.OriginalImg)
 	if err != nil {
-		dialog.ShowError(err, m.window)
+		dialog.ShowError(fmt.Errorf("failed to analyze page: %w", err), m.window)
 		return
 	}
 
-	m.gptView.SetText(analysis)
+	m.appendToChat(fmt.Sprintf("Analysis of page %d:", m.pageNum))
+	m.appendToChat("Assistant: " + response)
 }
 
 func (m *MainWindow) adjustZoom(delta float64) {
 	newZoom := m.zoomLevel + delta
-	if newZoom >= 0.25 && newZoom <= 5.0 {
+	if newZoom >= 0.1 && newZoom <= 5.0 {
 		m.zoomLevel = newZoom
 		m.updateZoomLabel()
 		m.updatePageDisplay()
 	}
+}
+
+func (m *MainWindow) updateZoomLabel() {
+	m.zoomLabel.SetText(fmt.Sprintf("Zoom: %.0f%%", m.zoomLevel*100))
 }
 
 func (m *MainWindow) Setup() {
@@ -128,9 +137,13 @@ func (m *MainWindow) Setup() {
 	zoomInBtn := widget.NewButton("+", func() { m.adjustZoom(0.1) })
 	
 	// Add preset zoom levels
-	zoomPresets := widget.NewSelect([]string{"50%", "75%", "100%", "125%", "150%", "200%"}, func(value string) {
+	zoomPresets := widget.NewSelect([]string{"10%", "25%", "50%", "75%", "100%", "125%", "150%", "200%"}, func(value string) {
 		var zoom float64
 		switch value {
+		case "10%":
+			zoom = 0.1
+		case "25%":
+			zoom = 0.25
 		case "50%":
 			zoom = 0.5
 		case "75%":
@@ -179,14 +192,8 @@ func (m *MainWindow) Setup() {
 	// Create a container to center the PDF display
 	pdfContainer := container.NewCenter(m.pdfDisplay)
 	
-	// Create the main PDF content with centered display
-	pdfContent := container.NewVBox(
-		pdfContainer,
-		m.pageText,
-	)
-	
 	// Create a scroll container for the PDF content
-	m.scrollPDF = container.NewScroll(pdfContent)
+	m.scrollPDF = container.NewScroll(pdfContainer)
 
 	// Set up GPT input and chat
 	m.gptView.MultiLine = true
@@ -264,21 +271,22 @@ func (m *MainWindow) Setup() {
 	})
 }
 
-func (m *MainWindow) updateZoomLabel() {
-	m.zoomLabel.SetText(fmt.Sprintf("Zoom: %.0f%%", m.zoomLevel*100))
-}
-
 func (m *MainWindow) updatePageDisplay() {
 	if m.pdfHandler == nil {
 		return
 	}
 
-	totalPages := m.pdfHandler.NumPages()
+	totalPages := m.pdfHandler.GetPageCount()
 	if totalPages == 0 {
 		return
 	}
 
-	// Update page display with zoom level
+	if m.pageNum < 1 {
+		m.pageNum = 1
+	} else if m.pageNum > totalPages {
+		m.pageNum = totalPages
+	}
+
 	pageInfo, err := m.pdfHandler.GetPage(m.pageNum, m.zoomLevel)
 	if err != nil {
 		dialog.ShowError(err, m.window)
@@ -289,24 +297,17 @@ func (m *MainWindow) updatePageDisplay() {
 	if pageInfo.Image != nil {
 		m.pdfDisplay.Image = pageInfo.Image
 		m.pdfDisplay.Resize(fyne.NewSize(
-			float32(pageInfo.Width),
-			float32(pageInfo.Height),
+			float32(float64(pageInfo.Width)*m.zoomLevel),
+			float32(float64(pageInfo.Height)*m.zoomLevel),
 		))
 		m.pdfDisplay.Refresh()
 	}
 
-	// Update text
-	if pageInfo.Text != "" {
-		m.pageText.SetText(pageInfo.Text)
-	} else {
-		m.pageText.SetText("")
-	}
-	
 	// Update status
 	m.pageLabel.SetText(fmt.Sprintf("Page %d of %d", m.pageNum, totalPages))
 	m.statusBar.SetText(fmt.Sprintf("PDF loaded - %d pages", totalPages))
 
-	// Scroll to top of page
+	// Reset scroll position
 	m.scrollPDF.Offset = fyne.NewPos(0, 0)
 	m.scrollPDF.Refresh()
 }
