@@ -5,11 +5,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
 
-const gsPath = "C:\\Program Files\\gs\\gs10.04.0\\bin\\gswin64c.exe"
+var gsPath string
+
+func init() {
+	if runtime.GOOS == "windows" {
+		gsPath = "C:\\Program Files\\gs\\gs10.04.0\\bin\\gswin64c.exe"
+	} else {
+		gsPath = "/usr/bin/gs"
+	}
+}
 
 // Handler manages PDF operations
 type Handler struct {
